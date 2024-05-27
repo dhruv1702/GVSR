@@ -34,7 +34,7 @@ class Eval_grvidsitu(nn.Module):
             self.met_keys = [ "cider", "rouge", "lea", "MacroVb_cider", "MacroArg_cider"]
             
         elif self.eval_type == 'Vb_SRL_eval':
-            self.met_keys = ["cider", "rouge", "lea", "MacroVb_cider", "MacroArg_cider", "Per_Ev_Top_1", "Per_Ev_Top_5", "recall_macro_1_th_9", "IoU", "IoU_30", "IoU_50"]
+            self.met_keys = ["cider", "rouge", "lea", "MacroVb_cider", "MacroArg_cider", "Per_Ev_Top_1", "Per_Ev_Top_5", "recall_macro_1_th_9"] # "IoU", "IoU_30", "IoU_50"]
 
         self.eval_vb = EvalB(cfg, comm)
         self.eval_SRL = EvalB_Gen(cfg, comm)
@@ -98,10 +98,11 @@ class Eval_grvidsitu(nn.Module):
             
             if self.eval_type == 'Vb_SRL_eval':
                 results_vb += self.eval_vb.generate_results(verbs_5, batch)
+            res_srl= self.eval_SRL.generate_results(pred_SRL_caps, GT_roles, bb_attn, batch)
 
-            res_srl, grounding_list, ious = self.eval_SRL.generate_results(pred_SRL_caps, GT_roles, bb_attn, batch)
+           # res_srl, grounding_list, ious = self.eval_SRL.generate_results(pred_SRL_caps, GT_roles, bb_attn, batch)
             results_SRL += res_srl
-            grounding_result += grounding_list
+            #grounding_result += grounding_list
 
         if self.cfg.train.visualise_bboxes:
             self.dump_groundings(grounding_result, pred_path)
@@ -138,9 +139,9 @@ class Eval_grvidsitu(nn.Module):
             for k, v in out_acc.items()
             if k in self.met_keys
         }
-        val_acc["IoU"] = torch.tensor(ious[0]).to(self.device)
-        val_acc["IoU_30"] = torch.tensor(ious[1]).to(self.device)
-        val_acc["IoU_50"] = torch.tensor(ious[2]).to(self.device)
+        # val_acc["IoU"] = torch.tensor(ious[0]).to(self.device)
+        # val_acc["IoU_30"] = torch.tensor(ious[1]).to(self.device)
+        # val_acc["IoU_50"] = torch.tensor(ious[2]).to(self.device)
 
         synchronize()
         if is_main_process():
@@ -264,14 +265,14 @@ class EvalB_Gen():
             list_res_for_grounding.append(list_grounding_text)
         
         grounding_info_list = self.get_grounding_info(inp, bb_attn, list_res_for_grounding)
-        self.gr_metric.calc_batch_grounding_metric(grounding_info_list, inp)
-        ious = self.gr_metric.get_ious()
-        return list_res_batch, grounding_info_list, ious
+        #self.gr_metric.calc_batch_grounding_metric(grounding_info_list, inp)
+        #ious = self.gr_metric.get_ious()
+        return list_res_batch#, grounding_info_list, ious
 
 
     def get_grounding_info(self, inp, bb_attn, list_res_for_grounding_batch):
 
-        bb_attn = bb_attn.cpu()
+        #bb_attn = bb_attn.cpu()
 
         grounding_list = []
         vid_id = inp['vseg_idx'] #B

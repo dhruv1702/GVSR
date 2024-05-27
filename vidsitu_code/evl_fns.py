@@ -3,6 +3,7 @@ Evaluating IVD
 Use eval metrics from Pycocoevalcap
 """
 import fire
+import os
 import pickle
 from typing import Dict, List
 import numpy as np
@@ -96,6 +97,15 @@ def read_gt_file(full_cfg, task_type, split_type):
     vseg_ann_lst = read_file_with_assertion(vsitu_ann_files_cfg[split_type])
 
     vsitu_ann_dct = {}
+
+    clip_feat_fpath = full_cfg.ds.vsitu.vsit_clip_frm_feats_dir  
+    clip_feat_files = os.listdir(clip_feat_fpath)
+    vseg_lst_new= []
+    for vid in vseg_lst:
+        if vid in clip_feat_files:
+            vseg_lst_new.append(vid)
+    vseg_lst = vseg_lst_new
+
     for vseg_ann in vseg_ann_lst:
         vseg = vseg_ann["Ev1"]["vid_seg_int"]
         if vseg not in vsitu_ann_dct:
@@ -422,7 +432,7 @@ class EvalFnCap:
         Scorer_ = namedtuple("Scorer_", ["cls_fn", "to_init", "out_str"])
         self.scorer_dict = {
             "bleu": Scorer_(
-                Bleu(4, verbose=0), False, ["bleu_1", "bleu_2", "bleu_3", "bleu_4"]
+                Bleu(4), False, ["bleu_1", "bleu_2", "bleu_3", "bleu_4"]
             ),
             "meteor": Scorer_(Meteor(), False, ["meteor"]),
             "cider": Scorer_(Cider("corpus"), False, ["cider"]),
@@ -437,7 +447,7 @@ class EvalFnCap:
             ("bcub", evaluator.b_cubed),
             ("ceafe", evaluator.ceafe),
             ("lea", evaluator.lea),
-            ("lea_soft", evaluator.lea_soft),
+            #("lea_soft", evaluator.lea_soft),
         ]
         self.reset_coval_scorer_dict()
 
@@ -463,6 +473,7 @@ class EvalFnCap:
         if self.cfg.debug_mode:
             pass
         else:
+
             assert sorted(list(hypo_dct.keys())) == sorted(
                 (list(self.gts_dct.keys()))
             ), "Missing Elements from Prediction"
@@ -599,7 +610,7 @@ class EvalFnCap:
 
         ev_lst = [f"Ev{ix}" for ix in range(1, 6)]
         ann_idx_keys = sorted(list(hyp_orig_dct.keys()))
-        coval_mets = ["mentions", "muc", "bcub", "ceafe", "lea", "lea_soft"]
+        coval_mets = ["mentions", "muc", "bcub", "ceafe", "lea"]
         out_f1_scores = {cmet: [] for cmet in coval_mets}
 
         is_lea_soft = False

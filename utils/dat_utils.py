@@ -121,10 +121,20 @@ def coalesce_dicts(dct_list: List[Dict]) -> Dict:
     """
     out_dict = {}
     for dct in dct_list:
-        for k in dct:
+        for k,v  in dct.items():
             if k in out_dict:
-                assert torch.all(out_dict[k] == dct[k])
-
+                #assert torch.all(out_dict[k] == dct[k])
+                if not torch.allclose(out_dict[k], v):
+                    # Debug information
+                    print(f"Key: {k}")
+                    print(f"out_dict[{k}]: {out_dict[k]}")
+                    print(f"dct[{k}]: {v}")
+                    print(f"Difference: {out_dict[k] - v}")
+                    # Trigger breakpoint here if debugging
+                    breakpoint()  # This will pause execution in a debugger if needed
+                    raise ValueError(f"Values for key '{k}' are not equal across dictionaries.")
+            else:
+                out_dict[k] = v
         out_dict.update(dct)
     return out_dict
 

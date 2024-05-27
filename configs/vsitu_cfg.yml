@@ -1,43 +1,46 @@
 ds:
   vsitu:
     name: 'vid_situ'
-    frames_11_dir: './data/vsitu_11_frames_per_vid/'
+    frames_11_dir: './vidsitu_data/vsitu_11_frames_per_vid/'
     split_files_lb:
-      train: './data/vidsitu_annotations/split_files/vseg_split_train_lb_new.json'
-      valid: './data/vidsitu_annotations/split_files/vseg_split_valid_lb_new.json'
-      test_verb: './data/vidsitu_annotations/split_files/vseg_split_testvb_lb.json'
-      test_srl: './data/vidsitu_annotations/split_files/vseg_split_testsrl_lb.json'
-      test_evrel: './data/vidsitu_annotations/split_files/vseg_split_testevrel_lb.json'
+      train: './vidsitu_data/vidsitu_annotations/split_files/vseg_split_train_lb.json'
+      valid: './vidsitu_data/vidsitu_annotations/split_files/vseg_split_valid_lb.json'
+      test_verb: './vidsitu_data/vidsitu_annotations/split_files/vseg_split_testvb_lb.json'
+      test_srl: './vidsitu_data/vidsitu_annotations/split_files/vseg_split_testsrl_lb.json'
+      test_evrel: './vidsitu_data/vidsitu_annotations/split_files/vseg_split_testevrel_lb.json'
     vinfo_files_lb:
-      train: './data/vidsitu_annotations/vinfo_files/vinfo_train_lb.json'
-      valid: './data/vidsitu_annotations/vinfo_files/vinfo_valid_lb.json'
-      test_verb: './data/vidsitu_annotations/vinfo_files/vinfo_testvb_lb.json'
-      test_srl: './data/vidsitu_annotations/vinfo_files/vinfo_testsrl_lb.json'
-      test_evrel: './data/vidsitu_annotations/vinfo_files/vinfo_testevrel_lb.json'
+      train: './vidsitu_data/vidsitu_annotations/vinfo_files/vinfo_train_lb.json'
+      valid: './vidsitu_data/vidsitu_annotations/vinfo_files/vinfo_valid_lb.json'
+      test_verb: './vidsitu_data/vidsitu_annotations/vinfo_files/vinfo_testvb_lb.json'
+      test_srl: './vidsitu_data/vidsitu_annotations/vinfo_files/vinfo_testsrl_lb.json'
+      test_evrel: './vidsitu_data/vidsitu_annotations/vinfo_files/vinfo_testevrel_lb.json'
     vsitu_ann_files_lb:
-      train: './data/vidsitu_annotations/vseg_ann_files/vsann_train_lb.json'
-      valid: './data/vidsitu_annotations/vseg_ann_files/vsann_valid_lb.json'
-      test_verb: './data/vidsitu_annotations/vseg_ann_files/vsann_testvb_lb.json'
-      test_srl: './data/vidsitu_annotations/vseg_ann_files/vsann_testsrl_lb.json'
-      test_evrel: './data/vidsitu_annotations/vseg_ann_files/vsann_testevrel_lb.json'
+      train: './vidsitu_data/vidsitu_annotations/vseg_ann_files/vsann_train_lb.json'
+      valid: './vidsitu_data/vidsitu_annotations/vseg_ann_files/vsann_valid_lb.json'
+      test_verb: './vidsitu_data/vidsitu_annotations/vseg_ann_files/vsann_testvb_lb.json'
+      test_srl: './vidsitu_data/vidsitu_annotations/vseg_ann_files/vsann_testsrl_lb.json'
+      test_evrel: './vidsitu_data/vidsitu_annotations/vseg_ann_files/vsann_testevrel_lb.json'
     vocab_files:
-      verb_id_vocab: './data/vsitu_vocab/verb_id_vocab.pkl'
-      new_gpt2_vb_arg_vocab: './data/vsitu_vocab/bpe_with_seps_vb_arg_vocab.pkl'
-    vsitu_frm_feats_dir: './features/vsitu_vid_feats/sfast_kpret_best_recall_epoch_5'
-    vsitu_objects_11_frames_dir: './features/vsitu_all_11_frames_feats/feats_bb'
-    vsitu_GT_ann_grounding: './data/vidsitu_annotations/vseg_ann_files/GT_grounding.json'
+      verb_id_vocab: './vidsitu_data/vsitu_vocab/verb_id_vocab.pkl'
+      new_gpt2_vb_arg_vocab: './vidsitu_data/vsitu_vocab/bpe_with_seps_vb_arg_vocab.pkl'
+    vsit_clip_frm_feats_dir: './vidsitu_data/clip_feat_vit-b32_11f'
+    vsitu_frm_feats_dir: './vidsitu_data/vsitu_vid_feats/sfast_kpret_best_recall_epoch_5'
+    vsitu_objects_11_frames_dir: './vidsitu_data/vsitu_all_11_frames_feats/feats_bb'
+    vsitu_GT_ann_grounding: './vidsitu_data/vidsitu_annotations/vseg_ann_files/GT_grounding.json'
     num_ev: 5
     num_frms: 11
     num_objs_per_frm: 15
     max_num_roles_per_event: 6
-    d_vid_emb: 2304
+    d_vid_emb: 512 #2304
     d_obj_emb: 2048
   trn_shuffle: true
   val_set_type: 'lb' 
 
-
+feats_type: 'image' # one of ["image", "event"]
 task_type: 'grounded_vb_srl_GT_role' # one of ["grounded_srl_GT_vbrole", "grounded_vb_srl_GT_role", "grounded_end-to-end"]
 loss_keys: ['loss_SRL', 'loss_vb']
+max_pool: True
+xtf: True
 
 expm:
   exp_name: 'experiment1'

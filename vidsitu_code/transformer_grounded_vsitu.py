@@ -3,7 +3,7 @@ import torch
 import torch.nn.functional as F
 from typing import Optional, List
 from torch import nn, Tensor
-from einops import repeat
+from einops import repeat, rearrange
 import itertools, math
 
 class MultiHeadAttention(nn.Module):
@@ -71,6 +71,46 @@ class MultiHeadAttention(nn.Module):
         attn_scores_max=torch.argmax(attn_scores, dim=-1)
         return self.out_lin(context), attn_scores_max
 
+class TxEncoderXTF_Obj(nn.Module):
+    def __init__(self, cfg, comm):
+        super().__init__()
+        self.full_cfg = cfg
+        self.comm = comm
+        proj_dim = 1024
+        num_heads = 8
+        num_layers = 1
+        #self.q_proj = nn.Linear(args.proj_dim*2, args.proj_dim)
+
+        #self.kv_proj = nn.Linear(args.image_dim, args.proj_dim)
+        
+        self.xatts = nn.ModuleList([CrossAttentionBlock(proj_dim, num_heads) for i in range(num_layers)])                
+        self.output_proj = nn.Linear(proj_dim, proj_dim)
+        self.cls_token = nn.Parameter(torch.zeros(5, proj_dim))
+
+    def forward(self, image_emb, verb_emb, object_emb, mask, centers=None):
+        q = torch.cat([verb_emb, object_emb], 2)  # concat verb_emb, object_emb
+        kv = image_emb
+
+        if len(q.shape) == 4:
+            q = rearrange(q, 'b c h w -> b (c h) w')
+        if len(kv.shape) == 4:
+            kv = rearrange(kv, 'b c h w -> b (c h) w')
+        #kv = self.kv_proj(kv)
+        # convert mask from bs x num_roles to bs x num_roles x dim (default: 512)
+        #mask = mask.unsqueeze(-1).repeat(1,1,self.dim)
+        #q = self.q_proj(q)
+        #q = q + self.pos_emb
+        
+        bs = len(image_emb)
+        q = torch.cat((self.cls_token.unsqueeze(0).repeat(bs, 1, 1),q),dim=1)
+        for layer in self.xatts:
+            q, kv, attn = layer(q, kv, mask)
+        
+        q = self.output_proj(q)
+        #logits = self.classifier(q)
+        
+        return q
+
 
 class Transformer_VO_RO(nn.Module):
 
@@ -82,7 +122,7 @@ class Transformer_VO_RO(nn.Module):
         self.pred_vb = pred_vb
         self.pred_role = pred_role
 
-        self.d_inp_vid_emb = self.comm.d_vid_emb
+        self.d_inp_vid_emb = self.comm.d_vid_emb #512
         self.d_inp_obj_emb = self.comm.d_obj_emb
 
         self.model_cfg = cfg.transformer_VO_RO  
@@ -127,6 +167,7 @@ class Transformer_VO_RO(nn.Module):
         self.num_verb_classes = len(comm.vb_id_vocab)
         self.num_role_classes = len(comm.arg_role_vocab)
         self.arg_role_voc = comm.arg_role_vocab
+        self.maxpool = nn.MaxPool1d(kernel_size=3, stride=2)
 
         # Video Object Transformer encoder
         vo_encoder_layer = TransformerEncoderLayer(self.d_vo_enc, nhead, self.d_ff, dropout, activation)
@@ -154,21 +195,43 @@ class Transformer_VO_RO(nn.Module):
        
 
     def process_vid_obj_inputs(self, inp):
-        B, N, D = inp['frm_feats'].size()
-        vid_feats = inp['frm_feats'] # Bx5x2304
-        vid_emb = self.vid_feat_project(vid_feats) # Bx5xD 
-        
-        #vid event positions
-        positions = vid_emb.new(self.num_events).long() 
-        positions = torch.arange(self.num_events, out=positions) 
-        vid_pos_emb = repeat(self.event_pos_embed(positions), 'n d -> b n d', b = B) # Bx5xD   
+        if self.cfg.xtf == False:
+            B, N, D = inp['frm_feats'].size()
+            if self.cfg.max_pool == True:
+                frm_feats = inp["frm_feats"].reshape(B * D, 11, N)  # Reshape to apply pooling
+                frm_feats = self.maxpool(frm_feats).reshape(B, D, 5, -1)  # Reduce N from 11 to 5
+                frm_feats = frm_feats.permute(0, 2, 3, 1)  # Bx5xD
+            else:
+                frm_feats = inp['frm_feats']  # Bx5x1024
+        else:
+            B, N, S, D = inp["xtf_frm_feats"].shape
+            if self.cfg.max_pool == True:
+                frm_feats = inp["xtf_frm_feats"].permute(0, 3, 2, 1).reshape(B * D, S, N)  # Push N to last position
+                frm_feats = self.maxpool(frm_feats).reshape(B, D, S, -1)  # Reduce N from 11 to 5
+                frm_feats = frm_feats.permute(0, 3, 2, 1)  # B, 5, S, D
+                frm_feats = torch.cat((frm_feats, inp["verb_feats"].unsqueeze(2)), dim=-2)  # Concatenate along S to make 51 from 50
+            else:
+                frm_feats = inp["xtf_frm_feats"]
 
-        type_vid = vid_emb.new(self.num_events).long() 
-        type_vid =  torch.zeros(self.num_events, out=type_vid) 
-        type_vid_emb = repeat(self.input_type_embed(type_vid), 'n d -> b n d', b = B) # Bx5xD   
+        vid_emb = self.vid_feat_project(frm_feats)  # Bx5xD or Bx5x51xD
 
-        vid_feats_5 = vid_emb+vid_pos_emb+type_vid_emb
+        # Video event positions
+        positions = vid_emb.new(self.num_events).long()
+        positions = torch.arange(self.num_events, out=positions)
 
+        if self.cfg.xtf:
+            # Repeat 51 times for the additional dimension when xtf is True
+            vid_pos_emb = repeat(self.event_pos_embed(positions), 'n d -> b n s d', b=B, s=51)  # Bx5x51xD
+            type_vid = torch.zeros(self.num_events, dtype=torch.long, device=vid_emb.device)
+            type_vid_emb = repeat(self.input_type_embed(type_vid), 'n d -> b n s d', b=B, s=51)  # Bx5x51xD
+        else:
+            vid_pos_emb = repeat(self.event_pos_embed(positions), 'n d -> b n d', b=B)  # Bx5xD
+            type_vid = torch.zeros(self.num_events, dtype=torch.long, device=vid_emb.device)
+            type_vid_emb = repeat(self.input_type_embed(type_vid), 'n d -> b n d', b=B)  # Bx5xD
+
+        vid_feats_5 = vid_emb + vid_pos_emb + type_vid_emb
+        vid_feats_5 = vid_feats_5.reshape(B, -1, 1024)  # Bx255xD
+        # Object features
         # 11 frames, each frame consist of 15 objects
         B,F,N,D = inp['feats_11_frames'].size()
         obj_feats_embd = inp['feats_11_frames'] # Bx11x15x2048
@@ -196,21 +259,21 @@ class Transformer_VO_RO(nn.Module):
         # boundary frames corresponding to both the neighboring events.
         pos_level1 = [0,0,0,1,1,2,2,3,3,4,4] 
         event_pos_per_frame_l1 = obj_spat_pos_embd.new_tensor(pos_level1).long()
-        frame_event_pos_emb_level1 = repeat(self.event_pos_embed(event_pos_per_frame_l1), 'n d -> b n d', b = B) # Bx11xD
+        frame_event_pos_emb_level1 = repeat(self.event_pos_embed(event_pos_per_frame_l1), 'n d -> b n d', b = B).clone() # Bx11xD
         pos_level2 = [1,2,3,4]
         pos_level2_idx = [2,4,6,8]
         event_pos_per_frame_l2 = obj_spat_pos_embd.new_tensor(pos_level2).long()
-        frame_event_pos_emb_level2 = repeat(self.event_pos_embed(event_pos_per_frame_l2), 'n d -> b n d', b = B) # Bx4xD
+        frame_event_pos_emb_level2 = repeat(self.event_pos_embed(event_pos_per_frame_l2), 'n d -> b n d', b = B).clone() # Bx4xD
         frame_event_pos_emb_level1[:,pos_level2_idx] = frame_event_pos_emb_level1[:,pos_level2_idx] + frame_event_pos_emb_level2
         #repeat the frame level event embeddings to object level event embeddings
         obj_event_pos_emb = repeat(frame_event_pos_emb_level1, 'b n d -> b n o d', o = self.num_objs_per_frm)
-        obj_event_pos_emb = obj_event_pos_emb.view(B,F_N,D)
+        obj_event_pos_emb = obj_event_pos_emb.reshape(B,F_N,D)
 
         # 11 frame level position embeddings for 11 frames
         frame_pos = vid_emb.new(self.num_frms).long()  
         frame_pos = torch.arange(self.num_frms, out=frame_pos)
         obj_frame_pos_embed = repeat(self.frame_pos_embed(frame_pos), 'n d -> b n o d', b = B, o = self.num_objs_per_frm) # Bx11x15xD
-        obj_frame_pos_embed = obj_frame_pos_embed.view(B,self.num_all_objs,D) # Bx165x512     
+        obj_frame_pos_embed = obj_frame_pos_embed.reshape(B,self.num_all_objs,D) # Bx165x512     
 
         #object type embedding
         type_obj = vid_emb.new(self.num_all_objs).long() 
@@ -221,7 +284,7 @@ class Transformer_VO_RO(nn.Module):
         encoder_src = torch.cat([vid_feats_5, obj_feats_165], dim=1)
 
         #mask for vid_obj encoder
-        len_obj_ev = self.num_events+self.num_all_objs
+        len_obj_ev = self.num_all_objs + 255 # self.num_all_objs + self.num_events
         alen = obj_feats_embd.new(len_obj_ev).long() 
         alen = torch.ones(len_obj_ev, out=alen) 
         attn_mask = alen[None,:].repeat(B,1)
@@ -249,7 +312,8 @@ class Transformer_VO_RO(nn.Module):
         return role_loss
 
     def get_event_aware_attention_map(self, inp):
-        atten_mask = inp['feats_11_frames'].new(self.tot_roles, self.num_all_objs).long() 
+        total_objs = self.num_all_objs + 250
+        atten_mask = inp['feats_11_frames'].new(self.tot_roles, total_objs).long() 
         B,F,N,D = inp['feats_11_frames'].size()
         atten_mask[:,:] = 0
 
@@ -304,7 +368,7 @@ class Transformer_VO_RO(nn.Module):
         positions = selected_roles.new(self.num_events).long() 
         positions = torch.arange(self.num_events, out=positions) # 5xD  
         positions_emb = repeat(self.event_pos_embed(positions), 'n d -> b n r d', b = B, r = 6) # Bx5x6xD    
-        positions_emb = positions_emb.view(B,-1, D) # Bx30xD    
+        positions_emb = positions_emb.reshape(B,-1, D) # Bx30xD    
         vid_role_src_query = vid_embed + selected_roles_embdedding + positions_emb
 
         return vid_role_src_query, selected_roles_pad_in_mask, selected_roles

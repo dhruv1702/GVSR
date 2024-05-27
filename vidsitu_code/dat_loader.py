@@ -4,7 +4,7 @@ import torch
 from torch.utils.data import Dataset
 from yacs.config import CfgNode as CN
 from typing import List, Dict
-from data.vsitu_vocab.create_vb_voc import vb_vocab
+from create_vb_voc import vb_vocab
 from munch import Munch
 import numpy as np
 from collections import Counter
@@ -27,7 +27,7 @@ def st_ag(ag):
 
 
 def end_ag(ag):
-    return f"</{ag}>"
+    return f"< {ag}>"
 
 
 def enclose_ag(agname, ag_str):
@@ -113,8 +113,31 @@ class VsituDS(Dataset):
 
         self.vseg_lst = read_file_with_assertion(split_files_cfg[split_type])
         vseg_ann_lst = read_file_with_assertion(vsitu_ann_files_cfg[split_type])
-
+        import os
+        clip_feat_fpath = self.cfg.vsit_clip_frm_feats_dir
+        clip_feat_files = os.listdir(clip_feat_fpath)
+        
+        vseg_lst_new = []
+        if self.full_cfg.feats_type == 'event':
+            # for event-wise feature extraction
+            for vid in self.vseg_lst:
+                all_exist = 0
+                for i in range(0,5):
+                    if vid+'_'+str(i) in clip_feat_files:
+                        all_exist += 1
+                if all_exist == 5:    
+                    vseg_lst_new.append(vid)
+            self.vseg_lst = vseg_lst_new
+            
+        # for single feature per video
+        elif self.full_cfg.feats_type == 'image': 
+            # for -wise feature extraction
+            for vid in self.vseg_lst:
+                if vid in clip_feat_files:
+                    vseg_lst_new.append(vid)
+            self.vseg_lst = vseg_lst_new
         vsitu_ann_dct = {}
+        
         for vseg_ann in vseg_ann_lst:
             vseg = vseg_ann["Ev1"]["vid_seg_int"]
             if vseg not in vsitu_ann_dct:
@@ -362,6 +385,69 @@ class VsituDS(Dataset):
         assert vid_feats.size(0) == 5
         return {"frm_feats": vid_feats}
 
+
+    def get_clip_frm_feats_all(self, idx: int):
+        vid_seg_name = self.vseg_lst[idx]
+        
+        import pickle
+        if self.full_cfg.feats_type=='image':                
+            vid_seg_feat_file = (
+            Path(self.cfg.vsit_clip_frm_feats_dir) / f"{vid_seg_name}"
+            )
+            # for image-based features
+            with open(vid_seg_feat_file,'rb') as f:
+                try:
+                    all_feats = pickle.load(f)
+                except Exception as e:
+                    print(e.errno,'error with unpickling ', vid_seg_feat_file)
+            obj_feats = self.get_all_bb_11_frames(vid_seg_name)
+            vid_feats = all_feats['vid_feat'].float()
+            xtf_vid_feats = all_feats['xtf_vid_feat'].float()
+            verb_feats = all_feats['verb_feat'].float().squeeze()
+            
+            #sample [0,2,4,6,8] or [1,3,5,7,9]
+            if not self.full_cfg.max_pool:
+                if vid_feats.size(0) == 11:
+                    return {"frm_feats": vid_feats, "verb_feats": verb_feats, "xtf_frm_feats": xtf_vid_feats, "obj_feats": obj_feats['feats_11_frames'], "obj_boxes": obj_feats['boxes_11_frames'], "img_size": obj_feats['img_size']}
+                
+                # rand = np.random.rand() > 0.5
+                # sampled_vid_feats = vid_feats[[1, 3, 5, 7, 9]] if rand else vid_feats[[0, 2, 4, 6, 8]]
+                # sampled_xtf_feats = xtf_vid_feats[[1, 3, 5, 7, 9]] if rand else xtf_vid_feats[[0, 2, 4, 6, 8]]
+                # assert sampled_vid_feats.size(0) == 5
+                # return {"frm_feats": sampled_vid_feats, "verb_feats": verb_feats, "xtf_frm_feats": sampled_xtf_feats, "obj_feats": obj_feats['feats_11_frames'], "obj_boxes": obj_feats['boxes_11_frames'], "img_size": obj_feats['img_size']}
+            else:
+                if vid_feats.size(0) == 11:
+                    return {"frm_feats": vid_feats, "verb_feats": verb_feats, "xtf_frm_feats": xtf_vid_feats, "obj_feats": obj_feats['feats_11_frames'], "obj_boxes": obj_feats['boxes_11_frames'], "img_size": obj_feats['img_size']}
+                else:
+                    return {"frm_feats": None, "verb_feats": None, "xtf_frm_feats": None, "obj_feats": None, "obj_boxes": None, "img_size": None}
+        else:
+            # for event-based features
+            vid_feats = []
+            verb_feats = []
+            xtf_vid_feats = []
+            for i in range(5):
+                vid_seg_feat_file = (
+                Path(self.cfg.vsit_clip_frm_feats_dir) / f"{vid_seg_name}_{i}"
+                )
+                with open(vid_seg_feat_file,'rb') as f:
+                    try:
+                        all_feats = pickle.load(f)
+                    except:
+                        print('error with unpickling ', vid_seg_feat_file)
+                        continue
+                    vid_feats.append(all_feats['vid_feat'].float())
+                    xtf_vid_feats.append(all_feats['xtf_vid_feat'].float())
+                    verb_feats.append(all_feats['verb_feat'].float().squeeze())
+                
+            vid_feats = torch.stack(vid_feats)
+            xtf_vid_feats = torch.stack(xtf_vid_feats)
+            verb_feats = torch.stack(verb_feats)
+            
+            assert vid_feats.size(0) == 5
+            
+            return {"frm_feats": vid_feats, "verb_feats": verb_feats, "xtf_frm_feats": xtf_vid_feats}
+
+
     def get_vb_label_out_dct(self, idx: int):
         vid_seg_name = self.vseg_lst[idx]
         if self.split_type == "train":
@@ -379,7 +465,8 @@ class VsituDS(Dataset):
 
 
     def grounded_vb_arg_item_getter(self, idx: int):
-        feats_out_dct = self.get_frm_feats_all(idx)
+        #feats_out_dct = self.get_frm_feats_all(idx)
+        feats_out_dct = self.get_clip_frm_feats_all(idx)
         feats_out_dct["vseg_idx"] = torch.tensor(idx)
         label_out_dct = self.get_vb_label_out_dct(idx) #verb GT labels
         vid_seg_name = self.vseg_lst[idx]
@@ -394,12 +481,13 @@ class VsituDS(Dataset):
             assert len(vid_seg_ann_) >= 3
             vid_seg_ann_ = vid_seg_ann_[:3]
             verb_arg_SRL_dct = self.get_vb_arg_SRL_dct(vid_seg_ann_)
-            gt_grounding_dict = self.get_all_grounding_gt(vid_seg_name, vid_seg_ann_)
+            #gt_grounding_dict = self.get_all_grounding_gt(vid_seg_name, vid_seg_ann_)
 
         bounding_boxes_dict = self.get_all_bb_11_frames(vid_seg_name)
 
         if "valid" in self.split_type:
-            out_verb_arg_SRL_dct = coalesce_dicts([feats_out_dct, label_out_dct, verb_arg_SRL_dct, bounding_boxes_dict, gt_grounding_dict])
+            #out_verb_arg_SRL_dct = coalesce_dicts([feats_out_dct, label_out_dct, verb_arg_SRL_dct, bounding_boxes_dict, gt_grounding_dict])
+            out_verb_arg_SRL_dct = coalesce_dicts([feats_out_dct, label_out_dct, verb_arg_SRL_dct, bounding_boxes_dict])
         else:    
             out_verb_arg_SRL_dct = coalesce_dicts([feats_out_dct, label_out_dct, verb_arg_SRL_dct, bounding_boxes_dict])
         return out_verb_arg_SRL_dct
