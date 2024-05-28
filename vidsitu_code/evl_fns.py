@@ -4,7 +4,7 @@ Use eval metrics from Pycocoevalcap
 """
 import fire
 import os
-import pickle
+import pickle5 as pickle
 from typing import Dict, List
 import numpy as np
 from collections import namedtuple, Counter

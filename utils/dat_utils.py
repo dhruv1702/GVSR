@@ -13,7 +13,7 @@ from typing import Dict, Optional, Union, List, Tuple
 # from fairseq.data import Dictionary
 import numpy as np
 import json
-import pickle
+import pickle5 as pickle
 
 csv.field_size_limit(sys.maxsize)
 FIELDNAMES = ["img_id", "img_h", "img_w", "objects_id", "objects_conf",

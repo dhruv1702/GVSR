@@ -41,6 +41,7 @@ task_type: 'grounded_vb_srl_GT_role' # one of ["grounded_srl_GT_vbrole", "ground
 loss_keys: ['loss_SRL', 'loss_vb']
 max_pool: True
 xtf: True
+with_obj: True
 
 expm:
   exp_name: 'experiment1'

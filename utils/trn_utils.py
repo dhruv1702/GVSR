@@ -16,7 +16,7 @@ import datetime
 from dataclasses import dataclass
 from fastprogress.fastprogress import master_bar, progress_bar
 import logging
-import pickle
+import pickle5 as pickle
 from torch import distributed as dist
 from torch.utils.data import DataLoader
 import mlflow

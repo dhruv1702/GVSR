@@ -6,7 +6,7 @@ import torch
 from torch import nn
 from torch.nn import functional as F
 import cv2
-import pickle
+import pickle5 as pickle
 from pathlib import Path
 from utils.trn_utils import (
     progress_bar,

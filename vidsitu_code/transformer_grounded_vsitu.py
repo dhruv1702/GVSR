@@ -36,7 +36,8 @@ class MultiHeadAttention(nn.Module):
         assert dim == self.dim, 'Dimensions do not match: %s input vs %s configured' % (dim, self.dim)
         n_heads = self.n_heads
         dim_per_head = dim // n_heads
-        mask_reshape = (bs, 1, qlen, klen) if mask.dim() == 3 else (bs, 1, 1, klen)
+        if mask is not None:
+            mask_reshape = (bs, 1, qlen, klen) if mask.dim() == 3 else (bs, 1, 1, klen)
 
         def shape(x):
             """  projection """
@@ -58,8 +59,9 @@ class MultiHeadAttention(nn.Module):
 
         q = q / math.sqrt(dim_per_head)                                       # (bs, n_heads, qlen, dim_per_head)
         scores = torch.matmul(q, k.transpose(2, 3))                           # (bs, n_heads, qlen, klen)
-        mask = (mask == 0).view(mask_reshape).expand_as(scores)               # (bs, n_heads, qlen, klen)
-        scores.masked_fill_(mask, -float('inf'))                              # (bs, n_heads, qlen, klen)
+        if mask is not None:
+            mask = (mask == 0).view(mask_reshape).expand_as(scores)               # (bs, n_heads, qlen, klen)
+            scores.masked_fill_(mask, -float('inf'))                              # (bs, n_heads, qlen, klen)
         
         weights = F.softmax(scores.float(), dim=-1).type_as(scores)           # (bs, n_heads, qlen, klen)
         weights = F.dropout(weights, p=self.dropout, training=self.training)  # (bs, n_heads, qlen, klen)
@@ -71,6 +73,7 @@ class MultiHeadAttention(nn.Module):
         attn_scores_max=torch.argmax(attn_scores, dim=-1)
         return self.out_lin(context), attn_scores_max
 
+'''
 class TxEncoderXTF_Obj(nn.Module):
     def __init__(self, cfg, comm):
         super().__init__()
@@ -110,6 +113,7 @@ class TxEncoderXTF_Obj(nn.Module):
         #logits = self.classifier(q)
         
         return q
+'''
 
 
 class Transformer_VO_RO(nn.Module):
@@ -159,6 +163,10 @@ class Transformer_VO_RO(nn.Module):
         self.frame_pos_embed = nn.Embedding(self.num_frms,self.d_vo_enc)
         # video vs object type embedding
         self.input_type_embed = nn.Embedding(2, self.d_vo_enc)
+
+        # clip verb feature embedding
+        verb_clip_dim = 512
+        self.verb_embed = nn.Linear(verb_clip_dim, self.d_vo_enc)
         
         # vid embed and obj embed norm 
         self.vid_enc_emb_norm = nn.LayerNorm(self.d_vo_enc)
@@ -191,7 +199,9 @@ class Transformer_VO_RO(nn.Module):
         # RO Decoder
         ro_dec_layer = TransformerDecoderLayer(self.d_ro_dec, nhead, self.d_ff, dropout, activation)
         ro_dec_norm = nn.LayerNorm(self.d_ro_dec)
-        self.ro_decoder = TransformerDecoder(ro_dec_layer, num_dec_lyrs, ro_dec_norm) 
+        self.ro_decoder = TransformerDecoder(ro_dec_layer, num_dec_lyrs, ro_dec_norm)
+        
+        self.XTF = TransformerDecoder(ro_dec_layer, num_dec_lyrs, ro_dec_norm)  
        
 
     def process_vid_obj_inputs(self, inp):
@@ -288,7 +298,7 @@ class Transformer_VO_RO(nn.Module):
         alen = obj_feats_embd.new(len_obj_ev).long() 
         alen = torch.ones(len_obj_ev, out=alen) 
         attn_mask = alen[None,:].repeat(B,1)
-        return encoder_src, attn_mask
+        return encoder_src, attn_mask, vid_feats_5
     
 
     def compute_vb_loss(self, inp, vb_pred):
@@ -372,17 +382,42 @@ class Transformer_VO_RO(nn.Module):
         vid_role_src_query = vid_embed + selected_roles_embdedding + positions_emb
 
         return vid_role_src_query, selected_roles_pad_in_mask, selected_roles
+    
+    def process_verb_role_query(self, inp, verb_feats, pred_roles, inference=False):
+        
+        # Use ground truth roles to model role queries and teacher force SRL.
+        B, N, N_, R = inp['args_all_ev'].size() #R=6 for max 6 roles per verb. 
+        selected_roles = inp['args_all_ev'][:,:,[0],:].clone() #Bx5x1x6
+        selected_roles_pad_mask = inp['args_len_all_ev'][:,:,[0],:].clone() #Bx5x1x6
+        selected_roles_pad_in_mask = selected_roles_pad_mask.squeeze().view(B,-1) #Bx30             
+        selected_roles = selected_roles.squeeze().view(B,-1) #Bx30 
+        selected_roles_embdedding = self.role_embed(selected_roles) #Bx30xD 
+        
+        verb_embed = verb_feats.unsqueeze(2).repeat(1,1,6,1) #Bx5x6xD
+        B,N,R,D = verb_embed.size()
+        verb_embed = verb_embed.view(B, -1, D) # Bx30xD
+
+        positions = selected_roles.new(self.num_events).long() 
+        positions = torch.arange(self.num_events, out=positions) # 5xD  
+        positions_emb = repeat(self.event_pos_embed(positions), 'n d -> b n r d', b = B, r = 6) # Bx5x6xD    
+        positions_emb = positions_emb.reshape(B,-1, D) # Bx30xD    
+        verb_role_src_query = verb_embed + selected_roles_embdedding + positions_emb
+
+        return verb_role_src_query, selected_roles_pad_in_mask, selected_roles
 
     
     def forward(self, inp, cfg, inference=False):
-        vid_obj_enc_emb, attn_mask_vid_obj = self.process_vid_obj_inputs(inp)
+        vid_obj_enc_emb, attn_mask_vid_obj, vid_feats_5 = self.process_vid_obj_inputs(inp)
 
         # Forward VO Transformer Encoder
-        vid_obj_out = self.vo_encoder(cfg, vid_obj_enc_emb, src_key_padding_mask=attn_mask_vid_obj)
-        vid_enc_out = vid_obj_out[:, 0:self.num_events, :]
-        obj_enc_out = vid_obj_out[:, self.num_events:, :]
-
-        vb_pred = self.verb_classifier(vid_enc_out) #Bx5xnum_verb_class
+        if self.cfg.with_obj:
+            vid_obj_out = self.vo_encoder(cfg, vid_obj_enc_emb, src_key_padding_mask=attn_mask_vid_obj)
+            vid_enc_out = vid_obj_out[:, 0:self.num_events, :]
+            obj_enc_out = vid_obj_out[:, self.num_events:, :]
+            vb_pred = self.verb_classifier(vid_enc_out) #Bx5xnum_verb_class
+        
+        else:
+            vb_pred = self.verb_classifier(vid_feats_5) #Bx5xnum_verb_class
 
         if self.pred_vb and not inference:
             vb_loss = self.compute_vb_loss(inp, vb_pred)
@@ -396,18 +431,29 @@ class Transformer_VO_RO(nn.Module):
             pred_roles = None
             role_loss = None
 
-        # Process the role query for role decoder
-        vid_role_src_query, roles_pad_mask_in, selected_roles = self.process_role_query(inp, vid_enc_out, pred_roles, inference=inference)
-        roles_pad_mask_in = roles_pad_mask_in.bool()
+        # # Process the role query for role decoder
+        # vid_role_src_query, roles_pad_mask_in, selected_roles = self.process_role_query(inp, vid_enc_out, pred_roles, inference=inference)
+        # roles_pad_mask_in = roles_pad_mask_in.bool()
 
         # Get event aware cross attention(momory) mask for RO decoder
-        attn_mask_obj_event_aware = self.get_event_aware_attention_map(inp)
-        obj_role_tgt = torch.zeros_like(vid_role_src_query)
+        # attn_mask_obj_event_aware = self.get_event_aware_attention_map(inp)
+        # obj_role_tgt = torch.zeros_like(vid_role_src_query)
 
         # Forward RO Transformer Decoder
-        grounded_nouns_emb, bb_attn = self.ro_decoder(cfg, tgt=obj_role_tgt, memory=obj_enc_out, tgt_key_padding_mask=roles_pad_mask_in,
-                           memory_key_padding_mask=attn_mask_obj_event_aware, query_pos=vid_role_src_query)   
+        # grounded_nouns_emb, bb_attn = self.ro_decoder(cfg, tgt=obj_role_tgt, memory=obj_enc_out, tgt_key_padding_mask=roles_pad_mask_in,
+                        #    memory_key_padding_mask=attn_mask_obj_event_aware, query_pos=vid_role_src_query)   
 
+        # Process verb-role query for XTF
+        verb_feats = inp['verb_feats'] # Clip verb features -- Bx5x512
+        verb_feats = self.verb_embed(verb_feats)
+        verb_role_query, roles_pad_mask_in, selected_roles = self.process_verb_role_query(inp, verb_feats, pred_roles, inference=inference)
+        roles_pad_mask_in = roles_pad_mask_in.bool()
+        obj_role_tgt = torch.zeros_like(verb_role_query)
+        if self.cfg.with_obj:
+            # Replace RO Transformer Decoder with XTF
+            grounded_nouns_emb, bb_attn = self.XTF(cfg, tgt=obj_role_tgt, memory=vid_enc_out, tgt_key_padding_mask=roles_pad_mask_in, query_pos=verb_role_query)   
+        else:
+            grounded_nouns_emb, bb_attn = self.XTF(cfg, tgt=obj_role_tgt, memory=vid_feats_5, tgt_key_padding_mask=roles_pad_mask_in, query_pos=verb_role_query)   
         return vb_pred, vb_loss, pred_roles, role_loss, grounded_nouns_emb, bb_attn, selected_roles
 
 

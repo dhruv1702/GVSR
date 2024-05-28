@@ -389,7 +389,7 @@ class VsituDS(Dataset):
     def get_clip_frm_feats_all(self, idx: int):
         vid_seg_name = self.vseg_lst[idx]
         
-        import pickle
+        import pickle5 as pickle
         if self.full_cfg.feats_type=='image':                
             vid_seg_feat_file = (
             Path(self.cfg.vsit_clip_frm_feats_dir) / f"{vid_seg_name}"
