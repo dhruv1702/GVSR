@@ -167,6 +167,10 @@ class Transformer_VO_RO(nn.Module):
         # clip verb feature embedding
         verb_clip_dim = 512
         self.verb_embed = nn.Linear(verb_clip_dim, self.d_vo_enc)
+
+        # XTF feat reducer
+        self.num_xtf_feats = 250
+        self.vid_xtf_dimreduce = nn.Linear(self.num_xtf_feats, self.num_events)
         
         # vid embed and obj embed norm 
         self.vid_enc_emb_norm = nn.LayerNorm(self.d_vo_enc)
@@ -219,28 +223,28 @@ class Transformer_VO_RO(nn.Module):
                 frm_feats = inp["xtf_frm_feats"].permute(0, 3, 2, 1).reshape(B * D, S, N)  # Push N to last position
                 frm_feats = self.maxpool(frm_feats).reshape(B, D, S, -1)  # Reduce N from 11 to 5
                 frm_feats = frm_feats.permute(0, 3, 2, 1)  # B, 5, S, D
-                frm_feats = torch.cat((frm_feats, inp["verb_feats"].unsqueeze(2)), dim=-2)  # Concatenate along S to make 51 from 50
+                # frm_feats = torch.cat((frm_feats.unsqueeze(2), inp['verb_feats']), dim=-2)  # Concatenate along S to make 51 from 50
             else:
                 frm_feats = inp["xtf_frm_feats"]
 
-        vid_emb = self.vid_feat_project(frm_feats)  # Bx5xD or Bx5x51xD
+        vid_emb = self.vid_feat_project(frm_feats)  # Bx5xD or Bx5x50xD
 
         # Video event positions
         positions = vid_emb.new(self.num_events).long()
         positions = torch.arange(self.num_events, out=positions)
 
         if self.cfg.xtf:
-            # Repeat 51 times for the additional dimension when xtf is True
-            vid_pos_emb = repeat(self.event_pos_embed(positions), 'n d -> b n s d', b=B, s=51)  # Bx5x51xD
+            # Repeat 50 times for the additional dimension when xtf is True
+            vid_pos_emb = repeat(self.event_pos_embed(positions), 'n d -> b n s d', b=B, s=50)  # Bx5x50xD
             type_vid = torch.zeros(self.num_events, dtype=torch.long, device=vid_emb.device)
-            type_vid_emb = repeat(self.input_type_embed(type_vid), 'n d -> b n s d', b=B, s=51)  # Bx5x51xD
+            type_vid_emb = repeat(self.input_type_embed(type_vid), 'n d -> b n s d', b=B, s=50)  # Bx5x50xD
         else:
             vid_pos_emb = repeat(self.event_pos_embed(positions), 'n d -> b n d', b=B)  # Bx5xD
             type_vid = torch.zeros(self.num_events, dtype=torch.long, device=vid_emb.device)
             type_vid_emb = repeat(self.input_type_embed(type_vid), 'n d -> b n d', b=B)  # Bx5xD
 
         vid_feats_5 = vid_emb + vid_pos_emb + type_vid_emb
-        vid_feats_5 = vid_feats_5.reshape(B, -1, 1024)  # Bx255xD
+        vid_feats_5 = vid_feats_5.reshape(B, -1, 1024)  # Bx250xD
         # Object features
         # 11 frames, each frame consist of 15 objects
         B,F,N,D = inp['feats_11_frames'].size()
@@ -294,7 +298,7 @@ class Transformer_VO_RO(nn.Module):
         encoder_src = torch.cat([vid_feats_5, obj_feats_165], dim=1)
 
         #mask for vid_obj encoder
-        len_obj_ev = self.num_all_objs + 255 # self.num_all_objs + self.num_events
+        len_obj_ev = self.num_all_objs + self.num_xtf_feats 
         alen = obj_feats_embd.new(len_obj_ev).long() 
         alen = torch.ones(len_obj_ev, out=alen) 
         attn_mask = alen[None,:].repeat(B,1)
@@ -322,7 +326,7 @@ class Transformer_VO_RO(nn.Module):
         return role_loss
 
     def get_event_aware_attention_map(self, inp):
-        total_objs = self.num_all_objs + 250
+        total_objs = self.num_all_objs + self.num_xtf_feats
         atten_mask = inp['feats_11_frames'].new(self.tot_roles, total_objs).long() 
         B,F,N,D = inp['feats_11_frames'].size()
         atten_mask[:,:] = 0
@@ -339,6 +343,25 @@ class Transformer_VO_RO(nn.Module):
                 left+=object_stride
                 right=left+num_objs_per_event
             atten_mask[i,left:right] = 1
+        atten_mask = atten_mask[None,:,:].repeat(B,1,1)
+        return atten_mask
+    
+    def get_event_mask(self, inp, vid_feats):
+        B, num_xtf_feats, D = vid_feats.size()
+        # num of XTF features = 250
+        atten_mask = inp['xtf_frm_feats'].new(self.tot_roles, self.num_xtf_feats).long() 
+    
+        B,F,N,D = inp['xtf_frm_feats'].size()
+        atten_mask[:,:] = 0
+        # get block diagonal attention matrix
+        # there are self.num_events blocks in total containing 1s
+        # each block is of size num_roles(6)x num_xtf_feats_per_event(50)
+        for i in range(self.num_events):
+            num_roles = 6
+            num_xtf_feats_per_event = 50
+            start_row, end_row = i*num_roles, (i+1)*num_roles   
+            start_col, end_col = i*num_xtf_feats_per_event, (i+1)*num_xtf_feats_per_event  
+            atten_mask[start_row:end_row, start_col:end_col] = 1
         atten_mask = atten_mask[None,:,:].repeat(B,1,1)
         return atten_mask
 
@@ -412,12 +435,13 @@ class Transformer_VO_RO(nn.Module):
         # Forward VO Transformer Encoder
         if self.cfg.with_obj:
             vid_obj_out = self.vo_encoder(cfg, vid_obj_enc_emb, src_key_padding_mask=attn_mask_vid_obj)
-            vid_enc_out = vid_obj_out[:, 0:self.num_events, :]
-            obj_enc_out = vid_obj_out[:, self.num_events:, :]
+            vid_enc_out = vid_obj_out[:, :self.num_xtf_feats, :]
+            vb_input = self.vid_xtf_dimreduce(vid_enc_out.permute(0,2,1)) #Bx250xD
             vb_pred = self.verb_classifier(vid_enc_out) #Bx5xnum_verb_class
         
         else:
-            vb_pred = self.verb_classifier(vid_feats_5) #Bx5xnum_verb_class
+            vb_input = self.vid_xtf_dimreduce(vid_feats_5.permute(0,2,1)) #Bx250xD to Bx5xD
+            vb_pred = self.verb_classifier(vb_input.permute(0,2,1)) #Bx5xnum_verb_class
 
         if self.pred_vb and not inference:
             vb_loss = self.compute_vb_loss(inp, vb_pred)
@@ -449,11 +473,15 @@ class Transformer_VO_RO(nn.Module):
         verb_role_query, roles_pad_mask_in, selected_roles = self.process_verb_role_query(inp, verb_feats, pred_roles, inference=inference)
         roles_pad_mask_in = roles_pad_mask_in.bool()
         obj_role_tgt = torch.zeros_like(verb_role_query)
+
+        # Get event aware cross attention(memory) mask for XTF
+        attn_mask_event_aware = self.get_event_mask(inp, vid_feats_5)
+        
         if self.cfg.with_obj:
             # Replace RO Transformer Decoder with XTF
-            grounded_nouns_emb, bb_attn = self.XTF(cfg, tgt=obj_role_tgt, memory=vid_enc_out, tgt_key_padding_mask=roles_pad_mask_in, query_pos=verb_role_query)   
+            grounded_nouns_emb, bb_attn = self.XTF(cfg, tgt=obj_role_tgt, memory=vid_enc_out, memory_key_padding_mask=attn_mask_event_aware, tgt_key_padding_mask=roles_pad_mask_in, query_pos=verb_role_query)   
         else:
-            grounded_nouns_emb, bb_attn = self.XTF(cfg, tgt=obj_role_tgt, memory=vid_feats_5, tgt_key_padding_mask=roles_pad_mask_in, query_pos=verb_role_query)   
+            grounded_nouns_emb, bb_attn = self.XTF(cfg, tgt=obj_role_tgt, memory=vid_feats_5, memory_key_padding_mask=attn_mask_event_aware, tgt_key_padding_mask=roles_pad_mask_in, query_pos=verb_role_query)   
         return vb_pred, vb_loss, pred_roles, role_loss, grounded_nouns_emb, bb_attn, selected_roles
 
 
